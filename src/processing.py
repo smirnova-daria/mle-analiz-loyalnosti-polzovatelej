@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+import numpy as np
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from pathlib import Path
@@ -91,3 +92,88 @@ class DataProcessor:
             )
         self.df_rates = pd.read_csv(csv_path)
         return self.df_rates
+
+    def _convert_currency(self): 
+        # 1. Готовим таблицу курсов
+        rates = self.df_rates.copy()
+        rates['rate_date'] = pd.to_datetime(rates['data']).dt.normalize()
+
+        rates['rate_per_unit'] = rates['curs'] / rates['nominal']   # курс за 1 тенге
+        rates = rates[['rate_date', 'rate_per_unit']].drop_duplicates('rate_date')
+
+        # 2. Приводим дату заказа к дате без времени
+        self.df['order_date'] = self.df['order_dt'].dt.normalize()
+
+        # 3. Присоединяем курс по дате
+        self.df = self.df.merge(rates, how='left', left_on='order_date', right_on='rate_date')
+
+        # 4. Считаем выручку в рублях
+        self.df['revenue_rub'] = np.where(
+            self.df['currency_code'] == 'rub',
+            self.df['revenue'],
+            self.df['revenue'] * self.df['rate_per_unit']
+        ).round(2)
+
+        # 5. Убираем служебные столбцы
+        self.df = self.df.drop(columns=['order_date', 'rate_date', 'rate_per_unit'])
+
+        if self.df['revenue_rub'].isna().any():
+            n = self.df['revenue_rub'].isna().sum()
+            print(f"Внимание: {n} заказов без курса, revenue_rub = NaN")
+        
+
+    def _optimize_types(self): 
+        # Оптимизируем тип tickets_count 
+        self.df['tickets_count'] = pd.to_numeric(self.df['tickets_count'], downcast='integer')
+        # Оптимизируем тип days_since_prev
+        self.df['days_since_prev'] = self.df['days_since_prev'].astype('Int64')
+
+    def _drop_duplicates(self):
+        # Содержательные поля, определяющие заказ (без order_id и days_since_prev)
+        order_key = [
+            'user_id', 'order_ts', 'device_type_canonical', 'currency_code',
+            'revenue', 'tickets_count', 'event_id', 'service_name'
+        ]
+
+        # Удаление: оставляем первое вхождение
+        rows_before = len(self.df)
+        self.df = self.df.drop_duplicates(subset=order_key, keep='first').copy()
+        rows_after = len(self.df)
+        
+        if rows_before - rows_after > 0:
+            print(f"Удалено строк-дубликатов: {rows_before - rows_after} ({(rows_before - rows_after)/rows_before:.2%})")
+
+
+    def _remove_negative_revenue(self): 
+        rows_before = len(self.df)
+        self.df = self.df[self.df['revenue_rub'] >= 0].copy()
+        
+        if rows_before - len(self.df) > 0:
+            print(f"Удалено заказов с отрицательной выручкой: {rows_before - len(self.df)}")
+
+    def _filter_p99_revenue(self): 
+        perc_99 = self.df['revenue_rub'].quantile(0.99)
+        old_shape = self.df.shape[0]
+        self.df = self.df[self.df['revenue_rub'] <= perc_99].copy()
+        
+        if old_shape - self.df.shape[0] > 0:
+            print(f'Удалено строк по выручке (>99-го перцентиля): {old_shape - self.df.shape[0]} ({(old_shape - self.df.shape[0]) / old_shape:.2%})')
+
+    def _recalc_days_since_prev(self):
+        # Пересчитываем интервалы между заказами уже по очищенным данным
+        self.df = self.df.sort_values(['user_id', 'order_ts', 'order_id']).reset_index(drop=True)
+        self.df['days_since_prev'] = self.df.groupby('user_id')['order_dt'].diff().dt.days.astype('Int64')
+
+
+    def preprocess(self) -> pd.DataFrame:
+        if self.df is None:
+            raise RuntimeError("Сначала загрузите данные.")
+        self._convert_currency()
+        self._drop_duplicates()
+        self._optimize_types()
+        self._remove_negative_revenue()
+        self._filter_p99_revenue()
+        self._recalc_days_since_prev()
+        print(f"[preprocess] заказов: {len(self.df)}, пользователей: {self.df['user_id'].nunique()}")
+        return self.df
+    
