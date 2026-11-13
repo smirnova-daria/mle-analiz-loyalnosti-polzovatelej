@@ -84,6 +84,8 @@ class DataProcessor:
         engine = create_engine(connection_string)
         query = query or self.DEFAULT_QUERY
         self.df = pd.read_sql_query(query, con=engine)
+        print(f"[load] заказов из БД: {len(self.df):_} "
+              f"(пользователей: {self.df['user_id'].nunique():_})")
         return self.df
 
     def load_data_from_csv(self, path: str | None = None) -> pd.DataFrame:
@@ -95,6 +97,8 @@ class DataProcessor:
                 "Подробности — в README.md, раздел «Подготовка данных»."
             )
         self.df = pd.read_csv(csv_path)
+        print(f"[load] заказов из CSV: {len(self.df):_} "
+              f"(пользователей: {self.df['user_id'].nunique():_})")
         return self.df
 
     def load_rates_from_csv(self, path: str | None = None) -> pd.DataFrame:
@@ -106,6 +110,8 @@ class DataProcessor:
                 "Подробности — в README.md, раздел «Подготовка данных»."
             )
         self.df_rates = pd.read_csv(csv_path)
+        print(f"[load] курсов тенге: {len(self.df_rates):_} строк "
+              f"({self.df_rates['data'].min()} — {self.df_rates['data'].max()})")
         return self.df_rates
 
     def _convert_currency(self): 
@@ -132,9 +138,9 @@ class DataProcessor:
         # 5. Убираем служебные столбцы
         self.df = self.df.drop(columns=['order_date', 'rate_date', 'rate_per_unit'])
 
-        if self.df['revenue_rub'].isna().any():
-            n = self.df['revenue_rub'].isna().sum()
-            print(f"Внимание: {n} заказов без курса, revenue_rub = NaN")
+        n_nan = int(self.df['revenue_rub'].isna().sum())
+        if n_nan:
+            print(f"[preprocess] заказов без курса: {n_nan}")
 
     def _optimize_types(self): 
         # Оптимизируем тип tickets_count
@@ -154,23 +160,26 @@ class DataProcessor:
         self.df = self.df.drop_duplicates(subset=order_key, keep='first').copy()
         rows_after = len(self.df)
 
-        if rows_before - rows_after > 0:
-            print(f"Удалено строк-дубликатов: {rows_before - rows_after} ({(rows_before - rows_after)/rows_before:.2%})")
+        removed = rows_before - rows_after
+        if removed:
+            print(f"[preprocess] удалено дубликатов: {removed} ({removed / rows_before:.2%})")
 
     def _remove_negative_revenue(self): 
         rows_before = len(self.df)
         self.df = self.df[self.df['revenue_rub'] >= 0].copy()
 
-        if rows_before - len(self.df) > 0:
-            print(f"Удалено заказов с отрицательной выручкой: {rows_before - len(self.df)}")
+        removed = rows_before - len(self.df)
+        if removed:
+            print(f"[preprocess] удалено заказов с отрицательной выручкой: {removed}")
 
     def _filter_p99_revenue(self): 
         perc_99 = self.df['revenue_rub'].quantile(0.99)
         old_shape = self.df.shape[0]
         self.df = self.df[self.df['revenue_rub'] <= perc_99].copy()
 
-        if old_shape - self.df.shape[0] > 0:
-            print(f'Удалено строк по выручке (>99-го перцентиля): {old_shape - self.df.shape[0]} ({(old_shape - self.df.shape[0]) / old_shape:.2%})')
+        removed = old_shape - self.df.shape[0]
+        if removed:
+            print(f"[preprocess] удалено заказов выше p99 ({perc_99:.0f} руб.): {removed} ({removed / old_shape:.2%})")
 
     def _recalc_days_since_prev(self):
         # Пересчитываем интервалы между заказами уже по очищенным данным
@@ -186,7 +195,7 @@ class DataProcessor:
         self._remove_negative_revenue()
         self._filter_p99_revenue()
         self._recalc_days_since_prev()
-        print(f"[preprocess] заказов: {len(self.df)}, пользователей: {self.df['user_id'].nunique()}")
+        print(f"[preprocess] итог: {len(self.df):_} заказов, {self.df['user_id'].nunique():_} пользователей")
         return self.df
 
     def build_user_profile(self) -> pd.DataFrame:
@@ -211,7 +220,7 @@ class DataProcessor:
         self.profile["is_two"] = self.profile["total_orders"] >= 2
 
         self._filter_profile_p99()
-        print(f"[build profile] пользователей: {self.profile.shape[0]}")
+        print(f"[profile] пользователей после фильтрации: {self.profile.shape[0]:_}")
         return self.profile
 
     def _filter_profile_p99(self):
@@ -223,8 +232,9 @@ class DataProcessor:
 
         self.profile = self.profile[self.profile["total_orders"] <= orders_p99].copy()
 
-        if users_before - len(self.profile) > 0:
-            print(f"Удалено пользователей (>99 перцентиля заказов): {users_before - len(self.profile)} ({(users_before - len(self.profile)) / users_before:.2%})")
+        removed = users_before - len(self.profile)
+        if removed:
+            print(f"[profile] удалено пользователей выше p99 заказов: {removed} ({removed / users_before:.2%})")
 
     def segment_retention(self, by: list[str]) -> dict:
         """Retention по сегментам.
@@ -390,14 +400,8 @@ class DataProcessor:
             }
         )
 
-        print(
-            f"[correlation] total_orders: топ-признак "
-            f"{top_total.index[0]} (φ_K = {top_total.iloc[0]:.2f})"
-        )
-        print(
-            f"[correlation] orders_group: топ-признак "
-            f"{top_group.index[0]} (φ_K = {top_group.iloc[0]:.2f})"
-        )
+        print(f"[correlation] total_orders: топ — {top_total.index[0]} (φ_K = {top_total.iloc[0]:.2f})")
+        print(f"[correlation] orders_group: топ — {top_group.index[0]} (φ_K = {top_group.iloc[0]:.2f})")
 
         return {
             "phik_total": phik_total,
