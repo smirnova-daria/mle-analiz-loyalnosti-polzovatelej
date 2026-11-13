@@ -4,6 +4,7 @@ import numpy as np
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from pathlib import Path
+from phik import phik_matrix
 
 
 class DataProcessor:
@@ -33,6 +34,19 @@ class DataProcessor:
     """
     DEFAULT_DATA_PATH = "data/afisha_purchases.csv"
     DEFAULT_RATES_PATH = "data/final_tickets_tenge_df.csv"
+    # признаки, участвующие в корреляционном анализе
+    CORR_FEATURES = [
+        "first_device_type",
+        "first_region",
+        "first_event_type",
+        "first_dow",
+        "avg_revenue_rub",
+        "avg_tickets",
+    ]
+    # интервальные признаки (числовые)
+    CORR_INTERVAL_COLS = ["avg_revenue_rub", "avg_tickets"]
+    # группы по числу заказов
+    ORDERS_GROUP_LABELS = ["1 заказ", "2 заказа", "3–4 заказа", "5 и более"]
 
     def __init__(self, data_path: str = None, rates_path: str = None):
         load_dotenv()
@@ -307,4 +321,88 @@ class DataProcessor:
             "rest": {"n": len(rest), "share": round(p_rest * 100, 1)},
             "diff_pp": round(diff_pp, 1),
             "conclusion": conclusion,
+        }
+
+    def _prepare_corr_inputs(self) -> pd.DataFrame:
+        """Копия профиля с добавленными first_dow и orders_group."""
+        if self.profile is None:
+            raise RuntimeError("Сначала постройте профиль: build_user_profile()")
+
+        df = self.profile.copy()
+
+        if "first_dow" not in df.columns:
+            dow_map = {0: "Пн", 1: "Вт", 2: "Ср", 3: "Чт", 4: "Пт", 5: "Сб", 6: "Вс"}
+            df["first_dow"] = pd.to_datetime(df["first_order"]).dt.dayofweek.map(
+                dow_map
+            )
+
+        if "orders_group" not in df.columns:
+            df["orders_group"] = pd.cut(
+                df["total_orders"],
+                bins=[0, 1, 2, 4, np.inf],
+                labels=self.ORDERS_GROUP_LABELS,
+            ).astype(str)
+
+        return df
+
+    def analyze_correlation(self) -> dict:
+        """Корреляционный анализ φ_K между признаками профиля и числом заказов.
+
+        Возвращает:
+            {
+                "phik_total": DataFrame,   # φ_K для непрерывного total_orders
+                "phik_group": DataFrame,   # φ_K для orders_group (сегменты)
+                "top_total": Series,       # связь с total_orders, по убыванию
+                "top_group": Series,       # связь с orders_group, по убыванию
+                "orders_group_stats": DataFrame,  # размеры сегментов
+            }
+        """
+        df = self._prepare_corr_inputs()
+
+        # 1. φ_K для непрерывного total_orders
+        corr_cols = self.CORR_FEATURES + ["total_orders"]
+        interval_cols = self.CORR_INTERVAL_COLS + ["total_orders"]
+        phik_total = phik_matrix(df[corr_cols], interval_cols=interval_cols)
+        top_total = (
+            phik_total["total_orders"]
+            .drop("total_orders")
+            .sort_values(ascending=False)
+            .round(3)
+        )
+
+        # 2. φ_K для сегментов orders_group
+        corr_cols_g = self.CORR_FEATURES + ["orders_group"]
+        interval_cols_g = self.CORR_INTERVAL_COLS
+        phik_group = phik_matrix(df[corr_cols_g], interval_cols=interval_cols_g)
+        top_group = (
+            phik_group["orders_group"]
+            .drop("orders_group")
+            .sort_values(ascending=False)
+            .round(3)
+        )
+
+        # 3. Размеры сегментов
+        counts = df["orders_group"].value_counts().reindex(self.ORDERS_GROUP_LABELS)
+        orders_group_stats = pd.DataFrame(
+            {
+                "users": counts,
+                "share": (counts / counts.sum()).round(3),
+            }
+        )
+
+        print(
+            f"[correlation] total_orders: топ-признак "
+            f"{top_total.index[0]} (φ_K = {top_total.iloc[0]:.2f})"
+        )
+        print(
+            f"[correlation] orders_group: топ-признак "
+            f"{top_group.index[0]} (φ_K = {top_group.iloc[0]:.2f})"
+        )
+
+        return {
+            "phik_total": phik_total,
+            "phik_group": phik_group,
+            "top_total": top_total,
+            "top_group": top_group,
+            "orders_group_stats": orders_group_stats,
         }
