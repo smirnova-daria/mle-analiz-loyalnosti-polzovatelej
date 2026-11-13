@@ -84,8 +84,10 @@ class DataProcessor:
         engine = create_engine(connection_string)
         query = query or self.DEFAULT_QUERY
         self.df = pd.read_sql_query(query, con=engine)
-        print(f"[load] заказов из БД: {len(self.df):_} "
-              f"(пользователей: {self.df['user_id'].nunique():_})")
+        print(
+            f"[load] заказов из БД: {len(self.df):_} "
+            f"(пользователей: {self.df['user_id'].nunique():_})"
+        )
         return self.df
 
     def load_data_from_csv(self, path: str | None = None) -> pd.DataFrame:
@@ -97,8 +99,10 @@ class DataProcessor:
                 "Подробности — в README.md, раздел «Подготовка данных»."
             )
         self.df = pd.read_csv(csv_path)
-        print(f"[load] заказов из CSV: {len(self.df):_} "
-              f"(пользователей: {self.df['user_id'].nunique():_})")
+        print(
+            f"[load] заказов из CSV: {len(self.df):_} "
+            f"(пользователей: {self.df['user_id'].nunique():_})"
+        )
         return self.df
 
     def load_rates_from_csv(self, path: str | None = None) -> pd.DataFrame:
@@ -110,81 +114,101 @@ class DataProcessor:
                 "Подробности — в README.md, раздел «Подготовка данных»."
             )
         self.df_rates = pd.read_csv(csv_path)
-        print(f"[load] курсов тенге: {len(self.df_rates):_} строк "
-              f"({self.df_rates['data'].min()} — {self.df_rates['data'].max()})")
+        print(
+            f"[load] курсов тенге: {len(self.df_rates):_} строк "
+            f"({self.df_rates['data'].min()} — {self.df_rates['data'].max()})"
+        )
         return self.df_rates
 
-    def _convert_currency(self): 
+    def _convert_currency(self):
         # 1. Готовим таблицу курсов
         rates = self.df_rates.copy()
-        rates['rate_date'] = pd.to_datetime(rates['data']).dt.normalize()
+        rates["rate_date"] = pd.to_datetime(rates["data"]).dt.normalize()
 
-        rates['rate_per_unit'] = rates['curs'] / rates['nominal']   # курс за 1 тенге
-        rates = rates[['rate_date', 'rate_per_unit']].drop_duplicates('rate_date')
+        rates["rate_per_unit"] = rates["curs"] / rates["nominal"]  # курс за 1 тенге
+        rates = rates[["rate_date", "rate_per_unit"]].drop_duplicates("rate_date")
 
         # 2. Приводим дату заказа к дате без времени
-        self.df['order_date'] = self.df['order_dt'].dt.normalize()
+        self.df["order_date"] = self.df["order_dt"].dt.normalize()
 
         # 3. Присоединяем курс по дате
-        self.df = self.df.merge(rates, how='left', left_on='order_date', right_on='rate_date')
+        self.df = self.df.merge(
+            rates, how="left", left_on="order_date", right_on="rate_date"
+        )
 
         # 4. Считаем выручку в рублях
-        self.df['revenue_rub'] = np.where(
-            self.df['currency_code'] == 'rub',
-            self.df['revenue'],
-            self.df['revenue'] * self.df['rate_per_unit']
+        self.df["revenue_rub"] = np.where(
+            self.df["currency_code"] == "rub",
+            self.df["revenue"],
+            self.df["revenue"] * self.df["rate_per_unit"],
         ).round(2)
 
         # 5. Убираем служебные столбцы
-        self.df = self.df.drop(columns=['order_date', 'rate_date', 'rate_per_unit'])
+        self.df = self.df.drop(columns=["order_date", "rate_date", "rate_per_unit"])
 
-        n_nan = int(self.df['revenue_rub'].isna().sum())
+        n_nan = int(self.df["revenue_rub"].isna().sum())
         if n_nan:
             print(f"[preprocess] заказов без курса: {n_nan}")
 
-    def _optimize_types(self): 
+    def _optimize_types(self):
         # Оптимизируем тип tickets_count
-        self.df['tickets_count'] = pd.to_numeric(self.df['tickets_count'], downcast='integer')
+        self.df["tickets_count"] = pd.to_numeric(
+            self.df["tickets_count"], downcast="integer"
+        )
         # Оптимизируем тип days_since_prev
-        self.df['days_since_prev'] = self.df['days_since_prev'].astype('Int64')
+        self.df["days_since_prev"] = self.df["days_since_prev"].astype("Int64")
 
     def _drop_duplicates(self):
         # Содержательные поля, определяющие заказ (без order_id и days_since_prev)
         order_key = [
-            'user_id', 'order_ts', 'device_type_canonical', 'currency_code',
-            'revenue', 'tickets_count', 'event_id', 'service_name'
+            "user_id",
+            "order_ts",
+            "device_type_canonical",
+            "currency_code",
+            "revenue",
+            "tickets_count",
+            "event_id",
+            "service_name",
         ]
 
         # Удаление: оставляем первое вхождение
         rows_before = len(self.df)
-        self.df = self.df.drop_duplicates(subset=order_key, keep='first').copy()
+        self.df = self.df.drop_duplicates(subset=order_key, keep="first").copy()
         rows_after = len(self.df)
 
         removed = rows_before - rows_after
         if removed:
-            print(f"[preprocess] удалено дубликатов: {removed} ({removed / rows_before:.2%})")
+            print(
+                f"[preprocess] удалено дубликатов: {removed} ({removed / rows_before:.2%})"
+            )
 
-    def _remove_negative_revenue(self): 
+    def _remove_negative_revenue(self):
         rows_before = len(self.df)
-        self.df = self.df[self.df['revenue_rub'] >= 0].copy()
+        self.df = self.df[self.df["revenue_rub"] >= 0].copy()
 
         removed = rows_before - len(self.df)
         if removed:
             print(f"[preprocess] удалено заказов с отрицательной выручкой: {removed}")
 
-    def _filter_p99_revenue(self): 
-        perc_99 = self.df['revenue_rub'].quantile(0.99)
+    def _filter_p99_revenue(self):
+        perc_99 = self.df["revenue_rub"].quantile(0.99)
         old_shape = self.df.shape[0]
-        self.df = self.df[self.df['revenue_rub'] <= perc_99].copy()
+        self.df = self.df[self.df["revenue_rub"] <= perc_99].copy()
 
         removed = old_shape - self.df.shape[0]
         if removed:
-            print(f"[preprocess] удалено заказов выше p99 ({perc_99:.0f} руб.): {removed} ({removed / old_shape:.2%})")
+            print(
+                f"[preprocess] удалено заказов выше p99 ({perc_99:.0f} руб.): {removed} ({removed / old_shape:.2%})"
+            )
 
     def _recalc_days_since_prev(self):
         # Пересчитываем интервалы между заказами уже по очищенным данным
-        self.df = self.df.sort_values(['user_id', 'order_ts', 'order_id']).reset_index(drop=True)
-        self.df['days_since_prev'] = self.df.groupby('user_id')['order_dt'].diff().dt.days.astype('Int64')
+        self.df = self.df.sort_values(["user_id", "order_ts", "order_id"]).reset_index(
+            drop=True
+        )
+        self.df["days_since_prev"] = (
+            self.df.groupby("user_id")["order_dt"].diff().dt.days.astype("Int64")
+        )
 
     def preprocess(self) -> pd.DataFrame:
         if self.df is None:
@@ -195,7 +219,9 @@ class DataProcessor:
         self._remove_negative_revenue()
         self._filter_p99_revenue()
         self._recalc_days_since_prev()
-        print(f"[preprocess] итог: {len(self.df):_} заказов, {self.df['user_id'].nunique():_} пользователей")
+        print(
+            f"[preprocess] итог: {len(self.df):_} заказов, {self.df['user_id'].nunique():_} пользователей"
+        )
         return self.df
 
     def build_user_profile(self) -> pd.DataFrame:
@@ -234,7 +260,9 @@ class DataProcessor:
 
         removed = users_before - len(self.profile)
         if removed:
-            print(f"[profile] удалено пользователей выше p99 заказов: {removed} ({removed / users_before:.2%})")
+            print(
+                f"[profile] удалено пользователей выше p99 заказов: {removed} ({removed / users_before:.2%})"
+            )
 
     def segment_retention(self, by: list[str]) -> dict:
         """Retention по сегментам.
@@ -259,8 +287,9 @@ class DataProcessor:
             if col not in self.profile.columns:
                 raise KeyError(f"Нет столбца {col!r} в профиле")
 
-            t = (self.profile.groupby(col, as_index=False)
-                .agg(users=("is_two", "size"), returned=("is_two", "sum")))
+            t = self.profile.groupby(col, as_index=False).agg(
+                users=("is_two", "size"), returned=("is_two", "sum")
+            )
             t["users_share"] = round(t["users"] / t["users"].sum(), 2)
             t["repeat_share"] = round(t["returned"] / t["users"], 2)
             t = t.sort_values("users", ascending=False).reset_index(drop=True)
@@ -272,7 +301,7 @@ class DataProcessor:
         """Сравнение доли вернувшихся пользователей: спорт vs концерты.
 
         Возвращает доли и разницу в п.п. Гипотеза H1 ноутбука:
-        «спорт возвращается чаще концертов». 
+        «спорт возвращается чаще концертов».
         """
         if self.profile is None:
             raise RuntimeError("Сначала постройте профиль: build_user_profile()")
@@ -292,7 +321,9 @@ class DataProcessor:
         if abs(diff_pp) < 1:
             conclusion = "Разница незначима на практике (менее 1 п.п.)"
         elif diff_pp < 0:
-            conclusion = "Спорт возвращается реже концертов: гипотеза H1 не подтверждена"
+            conclusion = (
+                "Спорт возвращается реже концертов: гипотеза H1 не подтверждена"
+            )
         else:
             conclusion = "Спорт возвращается чаще концертов: гипотеза H1 подтверждена"
 
@@ -400,8 +431,12 @@ class DataProcessor:
             }
         )
 
-        print(f"[correlation] total_orders: топ — {top_total.index[0]} (φ_K = {top_total.iloc[0]:.2f})")
-        print(f"[correlation] orders_group: топ — {top_group.index[0]} (φ_K = {top_group.iloc[0]:.2f})")
+        print(
+            f"[correlation] total_orders: топ — {top_total.index[0]} (φ_K = {top_total.iloc[0]:.2f})"
+        )
+        print(
+            f"[correlation] orders_group: топ — {top_group.index[0]} (φ_K = {top_group.iloc[0]:.2f})"
+        )
 
         return {
             "phik_total": phik_total,
