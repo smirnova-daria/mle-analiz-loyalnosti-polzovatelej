@@ -211,3 +211,100 @@ class DataProcessor:
 
         if users_before - len(self.profile) > 0:
             print(f"Удалено пользователей (>99 перцентиля заказов): {users_before - len(self.profile)} ({(users_before - len(self.profile)) / users_before:.2%})")
+
+    def segment_retention(self, by: list[str]) -> dict:
+        """Retention по сегментам.
+
+        Возвращает словарь:
+            {
+                "overall_repeat": float,           # доля вернувшихся по всей выборке
+                "segments": {                      # таблица на каждый признак
+                    "first_device_type": DataFrame,
+                    "first_event_type": DataFrame,
+                    "first_region": DataFrame,
+                },
+            }
+        """
+        if self.profile is None:
+            raise RuntimeError("Сначала постройте профиль: build_user_profile()")
+
+        overall = float(self.profile["is_two"].mean())
+        segments: dict[str, pd.DataFrame] = {}
+
+        for col in by:
+            if col not in self.profile.columns:
+                raise KeyError(f"Нет столбца {col!r} в профиле")
+
+            t = (self.profile.groupby(col, as_index=False)
+                .agg(users=("is_two", "size"), returned=("is_two", "sum")))
+            t["users_share"] = round(t["users"] / t["users"].sum(), 2)
+            t["repeat_share"] = round(t["returned"] / t["users"], 2)
+            t = t.sort_values("users", ascending=False).reset_index(drop=True)
+            segments[col] = t
+
+        return {"overall_repeat": overall, "segments": segments}
+
+    def test_hypothesis_sport_vs_concert(self) -> dict:
+        """Сравнение доли вернувшихся пользователей: спорт vs концерты.
+
+        Возвращает доли и разницу в п.п. Гипотеза H1 ноутбука:
+        «спорт возвращается чаще концертов». 
+        """
+        if self.profile is None:
+            raise RuntimeError("Сначала постройте профиль: build_user_profile()")
+
+        sport = self.profile[self.profile["first_event_type"] == "спорт"]
+        concert = self.profile[self.profile["first_event_type"] == "концерты"]
+
+        if len(sport) == 0 or len(concert) == 0:
+            raise ValueError(
+                "В профиле нет одного из сегментов: 'спорт' или 'концерты'"
+            )
+
+        p_sport = sport["is_two"].mean()
+        p_concert = concert["is_two"].mean()
+        diff_pp = (p_sport - p_concert) * 100
+
+        if abs(diff_pp) < 1:
+            conclusion = "Разница незначима на практике (менее 1 п.п.)"
+        elif diff_pp < 0:
+            conclusion = "Спорт возвращается реже концертов: гипотеза H1 не подтверждена"
+        else:
+            conclusion = "Спорт возвращается чаще концертов: гипотеза H1 подтверждена"
+
+        return {
+            "sport": {"n": len(sport), "share": round(p_sport * 100, 1)},
+            "concert": {"n": len(concert), "share": round(p_concert * 100, 1)},
+            "diff_pp": round(diff_pp, 1),
+            "conclusion": conclusion,
+        }
+
+    def test_hypothesis_top_regions(self, top_n: int = 10) -> dict:
+        """Сравнение доли вернувшихся: топ-N регионов vs остальные."""
+        if self.profile is None:
+            raise RuntimeError("Сначала постройте профиль: build_user_profile()")
+
+        region_counts = self.profile["first_region"].value_counts()
+        top_regions = region_counts.head(top_n).index
+
+        top = self.profile[self.profile["first_region"].isin(top_regions)]
+        rest = self.profile[~self.profile["first_region"].isin(top_regions)]
+
+        p_top = top["is_two"].mean()
+        p_rest = rest["is_two"].mean()
+        diff_pp = (p_top - p_rest) * 100
+
+        if abs(diff_pp) < 1:
+            conclusion = "Разница незначима на практике (менее 1 п.п.)"
+        elif diff_pp > 0:
+            conclusion = f"Топ-{top_n} регионов удерживают немного лучше: H2 подтверждается частично"
+        else:
+            conclusion = f"Топ-{top_n} регионов удерживают хуже: H2 не подтверждена"
+
+        return {
+            "top_n": top_n,
+            "top": {"n": len(top), "share": round(p_top * 100, 1)},
+            "rest": {"n": len(rest), "share": round(p_rest * 100, 1)},
+            "diff_pp": round(diff_pp, 1),
+            "conclusion": conclusion,
+        }
